@@ -1,0 +1,12 @@
+rules_version = '2';
+
+// EXO · Control de producción — acceso directo con el link.
+// La app entra sola con una sesión anónima de Firebase.
+// Bloquea a quien intente usar la base desde fuera de la app sin sesión.
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /{documento=**} {
+      allow read, write: if request.auth != null;
+    }
+  }
+}

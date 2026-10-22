@@ -2,65 +2,51 @@
 
 App web para cargar órdenes de producción, seguirlas por estado y cerrarlas con foto de la hoja del pedido. Funciona en la PC y en el celular, y los cambios se ven en vivo en todos los dispositivos.
 
+**Acceso directo:** se comparte el link y la app abre sola, sin usuario ni contraseña, y no registra quién hace cada cosa. Cualquiera que tenga el link puede ver, cargar, editar y borrar pedidos: compartilo solo con gente de confianza.
+
 - **Página:** GitHub Pages (gratis).
-- **Datos y fotos:** Supabase (gratis hasta 500 MB de base y 1 GB de fotos).
-- **Acceso:** cada operario entra con su propio email y contraseña.
+- **Datos y fotos:** Firebase de Google, plan gratuito Spark. No pide tarjeta de crédito.
+
+Las fotos se achican antes de subirse y se guardan dentro de la base de datos Firestore. Así no hace falta Cloud Storage, que desde febrero de 2026 exige el plan pago Blaze.
 
 ## Archivos
 
 | Archivo | Para qué sirve |
 |---|---|
 | `index.html`, `styles.css`, `app.js` | La aplicación |
-| `config.js` | Los datos de conexión a Supabase (lo único que hay que editar) |
-| `manifest.webmanifest`, `icon-*.png` | Permiten instalarla como app en el celular |
-| `supabase/01_estructura.sql` | Crea las tablas, la seguridad y la carpeta de fotos |
-| `supabase/02_catalogo_inicial.sql` | Carga los 56 artículos del catálogo anterior |
+| `config.js` | Los datos de conexión a Firebase (lo único que hay que editar) |
+| `firestore.rules` | Reglas de la base de datos. Se pegan en la consola de Firebase |
+| `catalogo_inicial.txt` | Los 56 artículos del catálogo anterior, para importar desde la app |
+| `manifest.webmanifest`, `icon-*.png` | Permiten instalar la app en el celular |
 
-## 1. Crear la base de datos en Supabase (una sola vez)
+La guía paso a paso completa está en el documento "Guía de instalación · EXO Control de producción".
 
-1. Entrá a [supabase.com](https://supabase.com), creá una cuenta y un proyecto nuevo. Elegí la región **South America (São Paulo)**, que es la más cercana. Guardá la contraseña de la base en un lugar seguro.
-2. En el proyecto, abrí **SQL Editor → New query**. Pegá todo el contenido de `supabase/01_estructura.sql` y tocá **Run**.
-3. Hacé lo mismo con `supabase/02_catalogo_inicial.sql`.
-4. **Desactivá el registro libre.** Esto es importante: sin este paso, cualquiera que encuentre la página podría crearse un usuario. Andá a **Authentication → Sign In / Providers** y apagá **Allow new users to sign up**.
-5. **Creá los usuarios.** Andá a **Authentication → Users → Add user → Create new user**. Cargá email y contraseña, y tildá **Auto Confirm User**. Repetí por cada persona que vaya a usar la app.
-6. **Copiá los datos de conexión.** En **Project Settings → API** están el **Project URL** y la **anon public key**. Pegalos en `config.js`:
+## Resumen de la instalación
 
-```js
-window.EXO_CONFIG = {
-  url: "https://abcdefgh.supabase.co",
-  anonKey: "eyJhbGciOi..."
-};
-```
+1. En [console.firebase.google.com](https://console.firebase.google.com), creá un proyecto sin Google Analytics.
+2. Creá la base **Firestore**: edición Standard, ubicación `southamerica-east1 (São Paulo)`, modo producción.
+3. En **Firestore → Reglas**, pegá `firestore.rules` y tocá **Publicar**.
+4. En **Authentication → Método de acceso**, habilitá **Anónimo**. Es lo que permite abrir la app directo, sin usuario.
+5. En **Configuración del proyecto → Tus apps**, registrá una app web y copiá `apiKey`, `authDomain`, `projectId` y `appId` en `config.js`.
+6. Subí todos los archivos a un repositorio de GitHub y activá **Settings → Pages** en `main / (root)`.
+7. Entrá a la app, andá a **Catálogo → Importar TXT** y elegí `catalogo_inicial.txt`.
 
-La anon key puede quedar a la vista en el repositorio: está pensada para eso. Los datos quedan protegidos porque solo los usuarios que creaste pueden iniciar sesión. **Nunca** pongas la `service_role` key en ningún archivo.
+## Compartir la app
 
-## 2. Publicar en GitHub Pages
+Pasá el link (`https://USUARIO.github.io/exo-produccion/`) por WhatsApp o mail. Quien lo abre ya puede usarla. En el celular conviene instalarla: en Android, menú ⋮ → **Agregar a la pantalla principal**; en iPhone, con Safari, compartir → **Agregar a inicio**.
 
-1. En GitHub, creá un repositorio nuevo, por ejemplo `exo-produccion`. Para usar Pages gratis tiene que ser público.
-2. Subí todos los archivos manteniendo la carpeta `supabase/`. Podés arrastrarlos en **Add file → Upload files**.
-3. Andá a **Settings → Pages**. En **Source** elegí **Deploy from a branch**, en **Branch** elegí `main` y `/ (root)`, y guardá.
-4. En uno o dos minutos la app queda en `https://TU-USUARIO.github.io/exo-produccion/`.
+Si el link llega a manos equivocadas, la forma de cortar el acceso es cambiar la dirección: renombrá el repositorio en GitHub (**Settings → Repository name**) y pasá el link nuevo solo a quien corresponda.
 
-## 3. Instalar en el celular
+## Límites del plan gratuito
 
-Abrí la dirección en el celular e iniciá sesión.
+| Recurso | Límite gratis | En la práctica |
+|---|---|---|
+| Espacio en Firestore | 1 GiB | Unas 4.000 fotos más miles de pedidos |
+| Lecturas | 50.000 por día | Alcanza para unos 20 dispositivos abriendo la app varias veces por día |
+| Escrituras | 20.000 por día | Sobra para cargar pedidos |
 
-- **Android (Chrome):** menú ⋮ → **Agregar a la pantalla principal**.
-- **iPhone (Safari):** botón compartir → **Agregar a inicio**.
+Si un día se supera el límite, la app deja de guardar hasta el día siguiente, pero no se pierde nada ni se cobra nada. La app mantiene en vivo solo los últimos 150 pedidos, para ahorrar lecturas. Los anteriores se cargan con **Ver más pedidos**.
 
-Queda un ícono como cualquier app, y la sesión se mantiene iniciada.
+## Respaldo
 
-## Uso
-
-- **Nueva orden:** buscá piezas por código o descripción y ajustá cantidades. Número de pedido y cliente son obligatorios, y el número no se puede repetir.
-- **Cargar desde TXT:** acepta líneas como `1035`, `#1035 x2`, `2 x #1035` o `1035;2`. También acepta encabezados opcionales: `Pedido 123`, `Cliente: …`, `Vendedor: …`, `Responsable: …` y `Obs.: …`. El texto que genera **Copiar texto** se puede volver a cargar tal cual.
-- **Historial:** se puede filtrar por estado y buscar. Cada pedido permite editarlo, copiarlo, sacarle fotos y eliminarlo.
-- **Marcar OK:** pide una foto de la hoja del pedido y recién ahí lo pasa a terminado.
-- **Catálogo → Importar TXT:** una línea por artículo, con el formato `CATEGORÍA;CÓDIGO;DESCRIPCIÓN`. Antes de guardar muestra una vista previa. El CSV que descarga la app tiene el mismo formato, así que podés editar en Excel y volver a importar.
-
-## A tener en cuenta
-
-- **Pausa por inactividad.** En el plan gratuito, Supabase pausa el proyecto si pasa **7 días sin uso**. Con uso diario no pasa. Si se pausa, se reactiva desde el panel de Supabase con un clic, sin perder datos.
-- **Respaldo.** Descargá cada tanto el CSV de pedidos y de catálogo. Supabase también permite exportar la base desde **Database → Backups**.
-- **Espacio para fotos.** Las fotos se achican antes de subirse, a unos 200–400 KB cada una. 1 GB alcanza para unas 3.000 fotos. Para liberar espacio, quitá fotos de pedidos viejos.
-- **Dar de baja a alguien.** En **Authentication → Users**, borrá su usuario.
+Descargá cada tanto el CSV de pedidos (en Historial) y el de catálogo (en Catálogo). El CSV del catálogo usa el mismo formato que la importación TXT, así que sirve para restaurarlo.

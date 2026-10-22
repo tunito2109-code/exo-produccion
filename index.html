@@ -14,15 +14,13 @@
 <link rel="stylesheet" href="styles.css">
 </head>
 <body>
-<section id="login" aria-label="Ingreso">
+<section id="login" aria-label="Bienvenida">
   <div class="login-card">
     <div class="brand-big">EXO<small>Control de producción</small></div>
     <div class="tape"></div>
-    <form id="loginForm" autocomplete="on">
-      <div><label class="f" for="lEmail">Email</label><input type="email" id="lEmail" autocomplete="username" required></div>
-      <div><label class="f" for="lPass">Contraseña</label><input type="password" id="lPass" autocomplete="current-password" required></div>
+    <form id="nombreForm">
       <p id="loginMsg" role="alert"></p>
-      <button class="btn primary big" type="submit" id="btnEntrar">Entrar</button>
+      <button class="btn primary big" type="submit" id="btnEntrar">Reintentar</button>
     </form>
   </div>
 </section>
@@ -36,7 +34,6 @@
       <button data-tab="catalogo">Catálogo</button>
     </nav>
     <div class="status"><i class="dot" id="dot"></i><span id="statusTxt">Conectando…</span></div>
-    <div class="user-box"><span id="userTxt"></span><button id="btnSalir" hidden>Salir</button></div>
   </div>
   <div class="tape"></div>
 </header>
@@ -165,7 +162,9 @@
 
 <div class="toast" id="toast" role="status" aria-live="polite"></div>
 
-<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.117.2/dist/umd/supabase.js"></script>
+<script src="https://www.gstatic.com/firebasejs/12.19.0/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/12.19.0/firebase-auth-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/12.19.0/firebase-firestore-compat.js"></script>
 <script src="config.js"></script>
 <script src="app.js"></script>
 </body>

@@ -1,14 +1,16 @@
 /* EXO · Control de producción
-   Datos y fotos en Supabase. Configuración en config.js. */
+   Usuarios: Firebase Authentication. Datos y fotos: Cloud Firestore (plan gratuito Spark).
+   Configuración en config.js. */
 (function(){
 "use strict";
 
-const cfg = window.EXO_CONFIG || {};
-const BUCKET = "fotos";
+const cfg = window.EXO_FIREBASE || {};
 const ESTADOS = [["pendiente","Pendiente"],["produccion","En producción"],["terminado","Terminado"],["anulado","Anulado"]];
 const ESTADO_TXT = Object.fromEntries(ESTADOS);
-const S = { sb:null, user:null, arts:[], peds:[], items:[], edit:null,
-  hisFiltro:"todos", hisLimite:40, catSel:null, artEdit:null, urls:new Map(), canal:null };
+const PAGINA = 150;   // pedidos que se mantienen sincronizados en vivo
+const S = { db:null, auth:null, user:null, arts:[], peds:[], items:[], edit:null,
+  hisFiltro:"todos", hisLimite:40, limServ:PAGINA, hayMas:false, catSel:null, artEdit:null,
+  unsubArts:null, unsubPeds:null };
 
 /* ---------- Utilidades ---------- */
 const $ = id => document.getElementById(id);
@@ -17,6 +19,8 @@ const norm = s => String(s ?? "").normalize("NFD").replace(/[\u0300-\u036f]/g,""
 const fmtFecha = iso => { const d = new Date(iso); return (!iso || isNaN(d)) ? "" :
   d.toLocaleString("es-AR",{day:"2-digit",month:"2-digit",year:"numeric",hour:"2-digit",minute:"2-digit"}); };
 const ahoraISO = () => new Date().toISOString();
+const skuId = s => "s-" + String(s).trim().replace(/[^A-Za-z0-9_\-~:@+]/g, "_");
+const nroKey = s => "n-" + encodeURIComponent(String(s).trim().toLowerCase().replace(/\s+/g, " "));
 function lsGet(k){ try { return localStorage.getItem(k); } catch(e){ return null; } }
 function lsSet(k,v){ try { localStorage.setItem(k,v); } catch(e){} }
 
@@ -35,13 +39,14 @@ function confirmar(titulo, texto, boton){
   });
 }
 function errMsg(e){
-  const code = e && (e.code || e.statusCode);
-  if (code === "23505") return "Ya existe un registro con ese número o código.";
-  if (code === "42501" || code === "403" || code === 403) return "Tu usuario no tiene permiso para esta acción.";
-  if (e && /fetch|network|Failed/i.test(e.message || "")) return "Sin conexión. Revisá internet e intentá de nuevo.";
+  const c = e && e.code;
+  if (c === "dup") return "Ya existe un pedido con ese número.";
+  if (c === "permission-denied") return "Tu usuario no está habilitado. Pedile al administrador que lo agregue a la lista de permitidos.";
+  if (c === "unavailable" || c === "deadline-exceeded") return "Sin conexión. Revisá internet e intentá de nuevo.";
+  if (c === "resource-exhausted") return "Se alcanzó el límite gratuito diario de Firebase. Vuelve a funcionar mañana.";
+  if (c === "invalid-argument" && /size|bytes/i.test(e.message || "")) return "La foto es demasiado grande.";
   return "No se pudo guardar. " + (e && e.message ? e.message : "Intentá de nuevo.");
 }
-function chk(r){ if (r && r.error) throw r.error; return r ? r.data : null; }
 
 /* ---------- Pestañas ---------- */
 const TABS = ["orden","historial","catalogo"];
@@ -55,36 +60,29 @@ function irA(tab, push){
 document.querySelectorAll("[data-tab]").forEach(b => b.addEventListener("click", () => irA(b.dataset.tab)));
 window.addEventListener("hashchange", () => irA(location.hash.slice(1), false));
 
-/* ---------- Datos ---------- */
-const fromRow = r => ({ id:r.id, nro:r.nro, cliente:r.cliente, vendedor:r.vendedor, responsable:r.responsable,
-  observaciones:r.observaciones, items:r.items || [], fotos:r.fotos || [], estado:r.estado || "pendiente",
-  fecha:r.fecha, actualizado:r.actualizado, terminadoEn:r.terminado_en });
-
-async function cargarArts(){
-  const data = chk(await S.sb.from("articulos").select("sku,categoria,descripcion").order("categoria").order("descripcion").limit(10000));
-  S.arts = data || [];
-  renderCatalogo(); if ($("qPieza").value) buscarPiezas();
+/* ---------- Datos en vivo ---------- */
+function onErrSnap(e){
+  if (e && e.code === "permission-denied") { estado(false, "Sin permiso"); toast(errMsg(e), true); }
+  else estado(false, "Reconectando…");
 }
-async function cargarPeds(){
-  const data = chk(await S.sb.from("pedidos").select("*").order("fecha", {ascending:false}).limit(1000));
-  S.peds = (data || []).map(fromRow);
-  renderHistorial(); renderSugerencias();
+function suscribirArts(){
+  if (S.unsubArts) S.unsubArts();
+  S.unsubArts = S.db.collection("articulos").onSnapshot(snap => {
+    S.arts = snap.docs.map(d => d.data()).filter(a => a && a.sku)
+      .sort((a,b) => (a.categoria||"").localeCompare(b.categoria||"") || (a.descripcion||"").localeCompare(b.descripcion||""));
+    renderCatalogo(); if ($("qPieza").value) buscarPiezas();
+    estado(!snap.metadata.fromCache, snap.metadata.fromCache ? "Sin conexión" : "En línea");
+  }, onErrSnap);
 }
-const pend = {};
-function programar(que){
-  clearTimeout(pend[que]);
-  pend[que] = setTimeout(() => (que === "arts" ? cargarArts() : cargarPeds()).catch(() => estado(false, "Reconectando…")), 300);
+function suscribirPeds(){
+  if (S.unsubPeds) S.unsubPeds();
+  S.unsubPeds = S.db.collection("pedidos").orderBy("fecha","desc").limit(S.limServ).onSnapshot(snap => {
+    S.peds = snap.docs.map(d => ({...d.data(), id: d.id, items: d.data().items || [], fotos: d.data().fotos || [], estado: d.data().estado || "pendiente"}));
+    S.hayMas = snap.size >= S.limServ;
+    renderHistorial(); renderSugerencias();
+    estado(!snap.metadata.fromCache, snap.metadata.fromCache ? "Sin conexión" : "En línea");
+  }, onErrSnap);
 }
-function suscribir(){
-  if (S.canal) return;
-  S.canal = S.sb.channel("exo-cambios")
-    .on("postgres_changes", {event:"*", schema:"public", table:"articulos"}, () => programar("arts"))
-    .on("postgres_changes", {event:"*", schema:"public", table:"pedidos"}, () => programar("peds"))
-    .subscribe(st => estado(st === "SUBSCRIBED", st === "SUBSCRIBED" ? "En línea" : "Reconectando…"));
-}
-document.addEventListener("visibilitychange", () => {
-  if (document.visibilityState === "visible" && S.user) { programar("arts"); programar("peds"); }
-});
 
 /* ---------- Nueva orden ---------- */
 function renderItems(){
@@ -162,18 +160,32 @@ $("btnGuardar").addEventListener("click", async () => {
     observaciones: $("fObs").value.trim(), items: S.items.map(x => ({sku:x.sku, descripcion:x.descripcion, cantidad:x.cantidad})),
     actualizado: ahora };
   const btn = $("btnGuardar"); btn.disabled = true;
+  const db = S.db, nros = db.collection("nros"), peds = db.collection("pedidos");
   try {
     if (S.edit) {
-      chk(await S.sb.from("pedidos").update(fila).eq("id", S.edit.id));
+      const id = S.edit.id, kOld = nroKey(S.edit.nro), kNew = nroKey(nro);
+      await db.runTransaction(async tx => {
+        if (kOld !== kNew) {
+          const s = await tx.get(nros.doc(kNew));
+          if (s.exists && s.data().pedido !== id) throw {code: "dup"};
+          tx.delete(nros.doc(kOld)); tx.set(nros.doc(kNew), {pedido: id});
+        }
+        tx.update(peds.doc(id), fila);
+      });
       toast("Cambios guardados"); limpiarForm(); irA("historial");
     } else {
-      chk(await S.sb.from("pedidos").insert({...fila, fecha: ahora, estado: "pendiente", creado_por: S.user.email}));
+      const ref = peds.doc();
+      await db.runTransaction(async tx => {
+        const s = await tx.get(nros.doc(nroKey(nro)));
+        if (s.exists) throw {code: "dup"};
+        tx.set(nros.doc(nroKey(nro)), {pedido: ref.id});
+        tx.set(ref, {...fila, fecha: ahora, estado: "pendiente", fotos: []});
+      });
       lsSet("exo-vendedor", fila.vendedor); lsSet("exo-responsable", fila.responsable);
       toast(`Pedido ${nro} guardado`); limpiarForm();
     }
-    await cargarPeds();
   } catch(e) {
-    if (e && e.code === "23505") { $("fNro").classList.add("err"); toast(`El pedido ${nro} ya existe.`, true); }
+    if (e && e.code === "dup") { $("fNro").classList.add("err"); toast(`El pedido ${nro} ya existe.`, true); }
     else toast(errMsg(e), true);
   } finally { btn.disabled = false; }
 });
@@ -189,7 +201,10 @@ $("chipsEstado").addEventListener("click", e => {
 });
 let hisT;
 $("qHis").addEventListener("input", () => { clearTimeout(hisT); hisT = setTimeout(() => { S.hisLimite = 40; renderHistorial(); }, 200); });
-$("btnMas").addEventListener("click", () => { S.hisLimite += 40; renderHistorial(); });
+$("btnMas").addEventListener("click", () => {
+  if (pedidosFiltrados().length > S.hisLimite) { S.hisLimite += 40; renderHistorial(); }
+  else if (S.hayMas) { S.limServ += PAGINA; S.hisLimite += 40; toast("Cargando pedidos anteriores…"); suscribirPeds(); }
+});
 
 const tieneHoja = p => (p.fotos || []).some(f => f.tipo === "hoja");
 function pedidosFiltrados(){
@@ -204,8 +219,8 @@ function pedidosFiltrados(){
 function renderHistorial(){
   const abiertos = new Set([...document.querySelectorAll("details.ord[open]")].map(d => d.dataset.id));
   const lista = pedidosFiltrados(), vis = lista.slice(0, S.hisLimite);
-  $("hisCount").textContent = S.peds.length ? `${lista.length} de ${S.peds.length} pedidos` : "";
-  $("btnMas").hidden = lista.length <= S.hisLimite;
+  $("hisCount").textContent = S.peds.length ? `${lista.length} de ${S.peds.length}${S.hayMas ? "+" : ""} pedidos` : "";
+  $("btnMas").hidden = !(lista.length > S.hisLimite || S.hayMas);
   if (!vis.length) {
     $("orders").innerHTML = `<div class="empty">${S.peds.length ? "Ningún pedido coincide con la búsqueda." : "Todavía no hay pedidos. Cargá el primero en Nueva orden."}</div>`;
     return;
@@ -231,7 +246,7 @@ function renderHistorial(){
         </div>
         ${tabla}
         ${p.observaciones ? `<div class="o-grid"><div><b>Observaciones</b>${esc(p.observaciones)}</div></div>` : ""}
-        ${fotos.length ? `<div class="fotos">${fotos.map((f,i) => `<button type="button" data-act="ver" data-f="${i}" aria-label="Ver foto"><img data-path="${esc(f.path)}" alt="${f.tipo === "hoja" ? "Hoja del pedido" : "Foto del pedido"}"><span class="tag ${f.tipo === "hoja" ? "hoja" : ""}">${f.tipo === "hoja" ? "Hoja" : "Foto"}</span></button>`).join("")}</div>` : ""}
+        ${fotos.length ? `<div class="fotos">${fotos.map((f,i) => `<button type="button" data-act="ver" data-f="${i}" aria-label="Ver foto"><img src="${esc(f.mini || "")}" alt="${f.tipo === "hoja" ? "Hoja del pedido" : "Foto del pedido"}"><span class="tag ${f.tipo === "hoja" ? "hoja" : ""}">${f.tipo === "hoja" ? "Hoja" : "Foto"}</span></button>`).join("")}</div>` : ""}
         ${p.terminadoEn ? `<div class="o-meta" style="margin-top:8px">Terminado el ${fmtFecha(p.terminadoEn)}</div>` : ""}
         <div class="o-actions">
           ${est !== "terminado" && est !== "anulado" ? `<button class="btn ok" data-act="ok">Marcar OK</button>` : ""}
@@ -245,9 +260,7 @@ function renderHistorial(){
       </div>
     </details>`;
   }).join("");
-  cargarMiniaturas();
 }
-$("orders").addEventListener("toggle", e => { if (e.target.open) cargarMiniaturas(); }, true);
 
 function pedidoDe(el){ const d = el.closest("details.ord"); return d && S.peds.find(p => p.id === d.dataset.id); }
 function textoPedido(p){
@@ -274,10 +287,12 @@ $("orders").addEventListener("click", async e => {
   if (act === "borrar") {
     if (!(await confirmar(`Eliminar pedido ${p.nro}`, "Se borra para todos, con sus fotos, y no se puede deshacer. Si solo querés sacarlo de la lista activa, cambiá su estado a Anulado."))) return;
     try {
-      const paths = (p.fotos || []).map(f => f.path).filter(Boolean);
-      chk(await S.sb.from("pedidos").delete().eq("id", p.id));
-      if (paths.length) S.sb.storage.from(BUCKET).remove(paths).catch(() => {});
-      toast("Pedido eliminado"); await cargarPeds();
+      const batch = S.db.batch();
+      batch.delete(S.db.collection("pedidos").doc(p.id));
+      batch.delete(S.db.collection("nros").doc(nroKey(p.nro)));
+      (p.fotos || []).forEach(f => f.id && batch.delete(S.db.collection("fotos").doc(f.id)));
+      await batch.commit();
+      toast("Pedido eliminado");
     } catch(err) { toast(errMsg(err), true); }
   }
 });
@@ -289,32 +304,13 @@ $("orders").addEventListener("change", e => {
 });
 async function cambiarEstado(p, est){
   const ahora = ahoraISO(), upd = {estado: est, actualizado: ahora};
-  if (est === "terminado") upd.terminado_en = ahora;
-  try { chk(await S.sb.from("pedidos").update(upd).eq("id", p.id)); toast(`Pedido ${p.nro}: ${est === "terminado" ? "OK" : ESTADO_TXT[est]}`); await cargarPeds(); }
+  if (est === "terminado") upd.terminadoEn = ahora;
+  try { await S.db.collection("pedidos").doc(p.id).update(upd); toast(`Pedido ${p.nro}: ${est === "terminado" ? "OK" : ESTADO_TXT[est]}`); }
   catch(err) { toast(errMsg(err), true); renderHistorial(); }
 }
 
-/* ---------- Fotos ---------- */
+/* ---------- Fotos (comprimidas y guardadas en Firestore) ---------- */
 let fotoCtx = null, okPedido = null, verCtx = null;
-
-async function urlsFirmadas(paths){
-  const ahora = Date.now(), faltan = paths.filter(p => { const c = S.urls.get(p); return !c || c.vence < ahora; });
-  if (faltan.length) {
-    const r = await S.sb.storage.from(BUCKET).createSignedUrls(faltan, 3600);
-    if (!r.error) (r.data || []).forEach(x => { if (x.signedUrl) S.urls.set(x.path, {url: x.signedUrl, vence: ahora + 50*60*1000}); });
-  }
-  return paths.map(p => (S.urls.get(p) || {}).url);
-}
-async function cargarMiniaturas(){
-  const imgs = [...document.querySelectorAll("details.ord[open] img[data-path]:not([src])")];
-  if (!imgs.length) return;
-  try {
-    const urls = await urlsFirmadas([...new Set(imgs.map(i => i.dataset.path))]);
-    const mapa = new Map([...new Set(imgs.map(i => i.dataset.path))].map((p,i) => [p, urls[i]]));
-    imgs.forEach(i => { const u = mapa.get(i.dataset.path); if (u) i.src = u; else i.classList.add("broken"); });
-  } catch(e) {}
-}
-document.addEventListener("error", e => { if (e.target && e.target.tagName === "IMG") e.target.classList.add("broken"); }, true);
 
 function pedirHoja(p){
   okPedido = p;
@@ -330,19 +326,23 @@ $("okFoto").addEventListener("click", () => { if (!okPedido) return; fotoCtx = {
 function leerDataURL(file){
   return new Promise((res, rej) => { const r = new FileReader(); r.onload = () => res(r.result); r.onerror = rej; r.readAsDataURL(file); });
 }
-async function comprimir(file){
-  try {
-    const src = await leerDataURL(file);
-    const img = await new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = rej; i.src = src; });
-    const max = 1600, k = Math.min(1, max / Math.max(img.naturalWidth, img.naturalHeight));
+async function cargarImagen(file){
+  const src = await leerDataURL(file);
+  return new Promise((res, rej) => { const i = new Image(); i.onload = () => res(i); i.onerror = () => rej({message: "No se pudo leer la imagen. Probá con JPG o PNG."}); i.src = src; });
+}
+/* Achica la imagen hasta que entre en el tamaño máximo (Firestore admite hasta 1 MB por documento) */
+function aJPEG(img, ladoMax, calidad, maxChars){
+  let lado = ladoMax, q = calidad, url = "";
+  for (let intento = 0; intento < 8; intento++) {
+    const k = Math.min(1, lado / Math.max(img.naturalWidth, img.naturalHeight));
     const c = document.createElement("canvas");
-    c.width = Math.round(img.naturalWidth * k); c.height = Math.round(img.naturalHeight * k);
-    c.getContext("2d").drawImage(img, 0, 0, c.width, c.height);
-    const b = await new Promise(r => c.toBlob(r, "image/jpeg", 0.82));
-    if (b) return b;
-  } catch(e) {}
-  if (/^image\/(jpeg|png|webp)$/.test(file.type)) return file;
-  throw {message: "Ese formato de imagen no se puede usar. Probá con JPG o PNG."};
+    c.width = Math.max(1, Math.round(img.naturalWidth * k)); c.height = Math.max(1, Math.round(img.naturalHeight * k));
+    const g = c.getContext("2d"); g.fillStyle = "#fff"; g.fillRect(0, 0, c.width, c.height); g.drawImage(img, 0, 0, c.width, c.height);
+    url = c.toDataURL("image/jpeg", q);
+    if (!maxChars || url.length <= maxChars) return url;
+    if (q > 0.45) q -= 0.1; else lado = Math.round(lado * 0.8);
+  }
+  return url;
 }
 $("fotoIn").addEventListener("change", async e => {
   const file = e.target.files && e.target.files[0]; e.target.value = "";
@@ -351,18 +351,17 @@ $("fotoIn").addEventListener("change", async e => {
   const esHoja = ctx.tipo === "hoja";
   if (esHoja) { $("dlgOk").classList.add("busy"); $("okNote").textContent = "Subiendo foto…"; } else toast("Subiendo foto…");
   try {
-    const blob = await comprimir(file);
-    const ext = blob.type === "image/png" ? "png" : blob.type === "image/webp" ? "webp" : "jpg";
-    const path = `${ctx.pid}/${Date.now()}-${ctx.tipo}.${ext}`;
-    const up = await S.sb.storage.from(BUCKET).upload(path, blob, {contentType: blob.type || "image/jpeg", upsert: false});
-    if (up.error) throw up.error;
-    // Leer el pedido actualizado para no pisar fotos que otro haya agregado
-    const actual = chk(await S.sb.from("pedidos").select("fotos").eq("id", ctx.pid).single());
-    const ahora = ahoraISO();
-    const upd = { fotos: [...((actual && actual.fotos) || []), {path, tipo: ctx.tipo, fecha: ahora, por: S.user.email}], actualizado: ahora };
-    if (esHoja) { upd.estado = "terminado"; upd.terminado_en = ahora; }
-    chk(await S.sb.from("pedidos").update(upd).eq("id", ctx.pid));
-    await cargarPeds();
+    const img = await cargarImagen(file);
+    const grande = aJPEG(img, 1400, 0.72, 700000);
+    const mini = aJPEG(img, 220, 0.6, 30000);
+    const ahora = ahoraISO(), fref = S.db.collection("fotos").doc();
+    const meta = {id: fref.id, tipo: ctx.tipo, fecha: ahora, mini};
+    const upd = { fotos: firebase.firestore.FieldValue.arrayUnion(meta), actualizado: ahora };
+    if (esHoja) { upd.estado = "terminado"; upd.terminadoEn = ahora; }
+    const batch = S.db.batch();
+    batch.set(fref, {pedido: ctx.pid, tipo: ctx.tipo, fecha: ahora, data: grande});
+    batch.update(S.db.collection("pedidos").doc(ctx.pid), upd);
+    await batch.commit();
     const p = S.peds.find(x => x.id === ctx.pid);
     if (esHoja) { $("dlgOk").close(); okPedido = null; toast(`Pedido ${p ? p.nro : ""} marcado OK ✓`); }
     else toast("Foto agregada");
@@ -373,26 +372,32 @@ $("fotoIn").addEventListener("change", async e => {
 });
 async function verFoto(p, i){
   const f = (p.fotos || [])[i]; if (!f) return;
-  verCtx = {pid: p.id, path: f.path};
-  $("verImg").removeAttribute("src");
+  verCtx = {pid: p.id, id: f.id};
+  $("verImg").src = f.mini || "";
   $("verImg").alt = f.tipo === "hoja" ? "Hoja del pedido" : "Foto del pedido";
-  $("verTxt").textContent = `${f.tipo === "hoja" ? "Hoja del pedido" : "Foto"} · pedido ${p.nro} · ${fmtFecha(f.fecha)}${f.por ? " · " + f.por : ""}`;
+  $("verTxt").textContent = `${f.tipo === "hoja" ? "Hoja del pedido" : "Foto"} · pedido ${p.nro} · ${fmtFecha(f.fecha)}`;
   $("dlgVer").showModal();
-  const [u] = await urlsFirmadas([f.path]); if (u) $("verImg").src = u;
+  try {
+    const d = await S.db.collection("fotos").doc(f.id).get();
+    if (d.exists && verCtx && verCtx.id === f.id) $("verImg").src = d.data().data;
+  } catch(e) { toast("No se pudo cargar la foto en tamaño completo.", true); }
 }
 $("verCerrar").addEventListener("click", () => $("dlgVer").close());
 $("verQuitar").addEventListener("click", async () => {
   const ctx = verCtx; $("dlgVer").close(); if (!ctx) return;
   const p = S.peds.find(x => x.id === ctx.pid); if (!p) return;
-  const f = (p.fotos || []).find(x => x.path === ctx.path);
+  const f = (p.fotos || []).find(x => x.id === ctx.id);
   const aviso = f && f.tipo === "hoja" ? "Es la foto de la hoja: el pedido va a quedar como OK sin foto." : "La foto se borra para todos.";
   if (!(await confirmar("Quitar foto", aviso, "Quitar"))) return;
   try {
-    chk(await S.sb.from("pedidos").update({fotos: (p.fotos || []).filter(x => x.path !== ctx.path), actualizado: ahoraISO()}).eq("id", p.id));
-    S.sb.storage.from(BUCKET).remove([ctx.path]).catch(() => {});
-    toast("Foto quitada"); await cargarPeds();
+    const batch = S.db.batch();
+    batch.update(S.db.collection("pedidos").doc(p.id), {fotos: (p.fotos || []).filter(x => x.id !== ctx.id), actualizado: ahoraISO()});
+    batch.delete(S.db.collection("fotos").doc(ctx.id));
+    await batch.commit();
+    toast("Foto quitada");
   } catch(err) { toast(errMsg(err), true); }
 });
+document.addEventListener("error", e => { if (e.target && e.target.tagName === "IMG") e.target.classList.add("broken"); }, true);
 
 /* ---------- Catálogo ---------- */
 function renderCatalogo(){
@@ -406,7 +411,7 @@ function renderCatalogo(){
     (!q || q.split(/\s+/).every(w => norm(a.sku+" "+a.descripcion+" "+a.categoria).includes(w))));
   $("catCount").textContent = S.arts.length ? `${lista.length} de ${S.arts.length} artículos` : "";
   $("catList").innerHTML = lista.length ? lista.map(a => `<li><button data-s="${esc(a.sku)}"><span class="sku">#${esc(a.sku)}</span><span class="desc">${esc(a.descripcion)}</span><span class="c">${esc(a.categoria)}</span></button></li>`).join("")
-    : `<li class="empty" style="border:0">${S.arts.length ? "No hay artículos con ese filtro." : "El catálogo está vacío. Agregá el primer artículo o importá un TXT."}</li>`;
+    : `<li class="empty" style="border:0">${S.arts.length ? "No hay artículos con ese filtro." : "El catálogo está vacío. Tocá Importar TXT y elegí catalogo_inicial.txt."}</li>`;
 }
 $("chipsCat").addEventListener("click", e => { const b = e.target.closest(".chip"); if (!b) return; S.catSel = b.dataset.c || null; renderCatalogo(); });
 let catT; $("qCat").addEventListener("input", () => { clearTimeout(catT); catT = setTimeout(renderCatalogo, 150); });
@@ -428,16 +433,18 @@ $("artSave").addEventListener("click", async () => {
   const otro = S.arts.find(a => a.sku === sku);
   if (otro && (!S.artEdit || S.artEdit.sku !== sku)) { $("aSku").classList.add("err"); toast(`El código #${sku} ya existe: ${otro.descripcion}`, true); return; }
   try {
-    chk(await S.sb.from("articulos").upsert({sku, categoria: cat, descripcion: desc}));
-    if (S.artEdit && S.artEdit.sku !== sku) chk(await S.sb.from("articulos").delete().eq("sku", S.artEdit.sku));
-    $("dlgArt").close(); toast(S.artEdit ? "Artículo actualizado" : "Artículo agregado"); await cargarArts();
+    const batch = S.db.batch();
+    batch.set(S.db.collection("articulos").doc(skuId(sku)), {sku, categoria: cat, descripcion: desc});
+    if (S.artEdit && S.artEdit.sku !== sku) batch.delete(S.db.collection("articulos").doc(skuId(S.artEdit.sku)));
+    await batch.commit();
+    $("dlgArt").close(); toast(S.artEdit ? "Artículo actualizado" : "Artículo agregado");
   } catch(err) { toast(errMsg(err), true); }
 });
 $("artDel").addEventListener("click", async () => {
   const a = S.artEdit; if (!a) return;
   $("dlgArt").close();
   if (!(await confirmar(`Eliminar #${a.sku}`, `${a.descripcion}. Los pedidos ya cargados con esta pieza no cambian.`))) return;
-  try { chk(await S.sb.from("articulos").delete().eq("sku", a.sku)); toast("Artículo eliminado"); await cargarArts(); }
+  try { await S.db.collection("articulos").doc(skuId(a.sku)).delete(); toast("Artículo eliminado"); }
   catch(err) { toast(errMsg(err), true); }
 });
 
@@ -546,8 +553,12 @@ $("txtCatIn").addEventListener("change", async e => {
   if (!ok) return;
   toast("Importando…");
   try {
-    for (let i = 0; i < aEscribir.length; i += 500) chk(await S.sb.from("articulos").upsert(aEscribir.slice(i, i + 500)));
-    toast(`Catálogo actualizado: ${aEscribir.length} artículos`); await cargarArts();
+    for (let i = 0; i < aEscribir.length; i += 400) {
+      const batch = S.db.batch();
+      aEscribir.slice(i, i + 400).forEach(a => batch.set(S.db.collection("articulos").doc(skuId(a.sku)), a));
+      await batch.commit();
+    }
+    toast(`Catálogo actualizado: ${aEscribir.length} artículos`);
   } catch(err) { toast(errMsg(err), true); }
 });
 
@@ -581,48 +592,48 @@ function renderSugerencias(){
   $("dlResp").innerHTML = uniq("responsable").map(v => `<option value="${esc(v)}">`).join("");
 }
 
-/* ---------- Ingreso y arranque ---------- */
+/* ---------- Acceso directo: sin usuario, sin contraseña y sin registrar quién hace cada cosa ---------- */
+/* La app entra sola con una sesión anónima de Firebase, solo para que la base acepte los cambios. */
+let suscripto = false;
 function estado(on, txt){ $("dot").classList.toggle("on", on); $("statusTxt").textContent = txt; }
-function mostrarLogin(msg){ $("login").classList.add("on"); $("loginMsg").textContent = msg || ""; setTimeout(() => $("lEmail").focus(), 50); }
-
-async function entrar(user){
-  S.user = user;
-  $("login").classList.remove("on");
-  $("userTxt").textContent = user.email || ""; $("btnSalir").hidden = false;
-  estado(false, "Cargando…");
-  try { await Promise.all([cargarArts(), cargarPeds()]); estado(true, "En línea"); }
-  catch(e) { estado(false, "Sin conexión"); toast(errMsg(e), true); }
-  suscribir();
+function pantallaError(msg, puedeReintentar){
+  $("loginMsg").textContent = msg; $("btnEntrar").disabled = !puedeReintentar;
+  $("login").classList.add("on");
 }
-$("loginForm").addEventListener("submit", async e => {
-  e.preventDefault();
-  const btn = $("btnEntrar"); btn.disabled = true; $("loginMsg").textContent = "";
-  try {
-    const r = await S.sb.auth.signInWithPassword({email: $("lEmail").value.trim(), password: $("lPass").value});
-    if (r.error) { $("loginMsg").textContent = /invalid/i.test(r.error.message) ? "Email o contraseña incorrectos." : r.error.message; return; }
-    $("lPass").value = "";
-    entrar(r.data.user);
-  } catch(err) { $("loginMsg").textContent = "No hay conexión con el servidor."; }
-  finally { btn.disabled = false; }
-});
-$("btnSalir").addEventListener("click", async () => {
-  if (!(await confirmar("Cerrar sesión", "Vas a tener que volver a ingresar con tu email y contraseña.", "Salir"))) return;
-  await S.sb.auth.signOut(); location.reload();
-});
+function entrar(){
+  $("login").classList.remove("on");
+  if (suscripto) return;
+  suscripto = true; estado(false, "Cargando…");
+  suscribirArts(); suscribirPeds();
+}
+$("nombreForm").addEventListener("submit", e => { e.preventDefault(); location.reload(); });
 
-async function iniciar(){
+function errAcceso(e){
+  const c = e && e.code;
+  if (c === "auth/operation-not-allowed" || c === "auth/admin-restricted-operation")
+    return "Falta activar el acceso anónimo en Firebase: Authentication → Método de acceso → Anónimo.";
+  if (c === "auth/network-request-failed") return "No hay conexión a internet. Revisá la señal y tocá Reintentar.";
+  if (c === "auth/api-key-not-valid" || c === "auth/api-key-not-valid.-please-pass-a-valid-api-key." || c === "auth/invalid-api-key")
+    return "La apiKey de config.js no es válida. Copiala de nuevo desde la consola de Firebase, sin espacios.";
+  return "No se pudo conectar con la base de datos. " + ((e && e.message) || "");
+}
+
+function iniciar(){
   $("fVen").value = lsGet("exo-vendedor") || ""; $("fResp").value = lsGet("exo-responsable") || "";
   irA(location.hash.slice(1) || "orden", false);
   renderItems(); renderHistorial(); renderCatalogo();
-  if (!window.supabase || !cfg.url || !cfg.anonKey || /TU-PROYECTO/.test(cfg.url)) {
+  if (!window.firebase || !cfg.apiKey || /PEGAR/.test(cfg.apiKey)) {
     estado(false, "Sin configurar");
-    mostrarLogin("Falta configurar config.js con los datos de Supabase (ver README).");
-    $("btnEntrar").disabled = true; return;
+    pantallaError("Falta configurar config.js con los datos de Firebase (ver README).", false); return;
   }
-  S.sb = window.supabase.createClient(cfg.url, cfg.anonKey);
-  S.sb.auth.onAuthStateChange(ev => { if (ev === "SIGNED_OUT" && S.user) location.reload(); });
-  const { data } = await S.sb.auth.getSession();
-  if (data && data.session) entrar(data.session.user); else { estado(false, "Sin sesión"); mostrarLogin(); }
+  firebase.initializeApp(cfg);
+  S.auth = firebase.auth(); S.db = firebase.firestore();
+  try { S.db.enablePersistence({synchronizeTabs: true}).catch(() => {}); } catch(e) {}
+  S.auth.onAuthStateChanged(user => {
+    if (user) { S.user = user; entrar(); return; }
+    estado(false, "Conectando…");
+    S.auth.signInAnonymously().catch(err => { estado(false, "Sin conexión"); pantallaError(errAcceso(err), true); });
+  });
 }
 iniciar();
 })();

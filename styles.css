@@ -187,3 +187,4 @@ pre.probs{white-space:pre-wrap;background:var(--surface2);border-radius:8px;padd
 .user-box{display:flex;align-items:center;gap:8px;font-size:13px;color:#AEB8C2}
 .user-box button{background:none;border:1px solid #4A5664;color:#E5E9ED;border-radius:6px;padding:4px 10px;cursor:pointer;font-weight:600}
 @media (max-width:520px){.user-box #userTxt{display:none}}
+
